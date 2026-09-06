@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="rootlyai.png" alt="rootly.ai" width="88" />
+</p>
+
 # rootly.ai
 
 **rootly.ai turns a production error into a reviewed, ready-to-merge pull
