@@ -7,7 +7,9 @@ import { RootlyAI } from "@rootly.ai/node";
 
 const rootlyAI = new RootlyAI({
   apiKey: process.env.ROOTLY_AI_API_KEY!,
-  serverUrl: "http://localhost:3001",
+  // Base URL of the rootly.ai API (apps/api) that receives events, not your own app's URL.
+  // Local dev: http://localhost:3001. Production: your deployed rootly.ai API, e.g. https://api.your-domain.com
+  serverUrl: process.env.ROOTLY_AI_SERVER_URL!,
   serviceName: "payment-service",
   environment: "production",
   release: "1.0.0",
@@ -27,10 +29,15 @@ rootlyAI.captureMessage("Something unexpected happened");
 | `apiKey` | yes | — |
 | `serviceName` | yes | — |
 | `environment` | yes | — |
-| `serverUrl` | no | `http://localhost:3001` |
+| `serverUrl` | no, but **set it outside local dev** | `http://localhost:3001` |
 | `release` | no | — |
 | `debug` | no | `false` |
 | `enabled` | no | `true` |
+
+`serverUrl` is where the SDK POSTs events (`{serverUrl}/events`, with `Authorization: Bearer <apiKey>`).
+It must point at the rootly.ai API and be reachable from the monitored app. If you leave it unset
+outside local dev, the SDK falls back to `localhost:3001`, the send fails, and events are silently
+dropped (send errors never reach your app; use `debug: true` to see them).
 
 ## Behavior
 

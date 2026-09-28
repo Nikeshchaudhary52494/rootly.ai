@@ -1,5 +1,6 @@
 export interface RootlyAIConfig {
   apiKey: string;
+  /** Base URL of the rootly.ai API that receives events (POST {serverUrl}/events). Defaults to http://localhost:3001; set it outside local dev. */
   serverUrl?: string;
   serviceName: string;
   environment: string;
