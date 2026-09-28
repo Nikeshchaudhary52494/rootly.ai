@@ -93,19 +93,29 @@ Two separate auth mechanisms, for two separate audiences:
 ## Request flow for a single incident, end to end
 
 ```
+(once per project) POST /projects/:id/repository, then .../repository/sync
+
 demo-app crashes
   → SDK POSTs to /events (Bearer api-key)
   → incidents.service groups it into an Incident by deterministic fingerprint
-  → dashboard shows the incident
-  → POST /projects/:id/repository/sync           pulls the repo's file tree
-  → POST /incidents/:id/context/collect            matches stack trace → source
-  → POST /incidents/:id/investigate                 packages/agent, LangGraph
-  → POST /incidents/:id/reproduce                    packages/reproduction, Docker
-  → POST /incidents/:id/fix                            packages/fix-engine, Docker
-  → POST /incidents/:id/create-pr                       packages/github, real PR
+  → if the incident is NEW: POST /events calls runAutoPipeline(incidentId)
+      → context/collect      matches stack trace → source
+      → investigate           packages/agent, LangGraph
+      → reproduce              packages/reproduction, Docker   (must be REPRODUCED)
+      → fix                     packages/fix-engine, Docker    (must be FIX_VERIFIED)
+      → create-pr                packages/github, real PR
+    stops at the first stage that fails or isn't good enough
   → human reviews and merges on GitHub
 ```
 
-Every arrow after the first is a stage described in more detail in
-[pipeline.md](pipeline.md), backed by the tables walked through in
-[data-model.md](data-model.md).
+The stages in `runAutoPipeline` are the same service functions behind the
+`POST /incidents/:id/...` routes, so the dashboard buttons can start or re-run
+any stage by hand, and the precondition gates above apply either way. Set
+`AUTO_PIPELINE_ENABLED=false` to turn the automatic run off. Only a *new*
+incident starts it: repeat errors just bump `occurrenceCount`, and a reopened
+incident is not re-run. Like the stages themselves it runs in-process, so an
+API restart mid-run ends it (see [decisions.md](decisions.md#no-queueworker)).
+
+Every stage is described in more detail in [pipeline.md](pipeline.md), backed
+by the tables walked through in [data-model.md](data-model.md). The README has
+flowcharts of the [data flow](../README.md#data-flow).

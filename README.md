@@ -86,8 +86,8 @@ request.
 ## How it works
 
 ```
-apps/dashboard   Next.js UI — browse projects and incidents, trigger each
-                 pipeline stage, review results
+apps/dashboard   Next.js UI — browse projects and incidents, review results,
+                 re-run any pipeline stage by hand
 
 apps/api         Express API — owns the Postgres data model, orchestrates
                  the pipeline, exposes routes per resource
@@ -103,6 +103,122 @@ packages/shared        shared TypeScript types used by the dashboard
 
 demo-app         a small Express app pre-wired with a real, reproducible
                  bug, for trying the whole pipeline end to end
+```
+
+### Data flow
+
+Only the SDK runs inside your application. Everything else — reading your
+code, calling the LLM, running Docker sandboxes, opening the PR — runs on the
+rootly.ai server. The SDK sends the error name, message, stack trace and
+service info; it never reads or sends your source.
+
+```mermaid
+flowchart LR
+  subgraph APP["Your monitored app"]
+    ERR["Uncaught error or<br/>captureException()"] --> SDK["@rootly.ai/node SDK"]
+  end
+
+  subgraph SRV["rootly.ai server: apps/api on :3001"]
+    EV["POST /events<br/>API-key auth, validate, fingerprint"]
+    PIPE["runAutoPipeline<br/>(new incidents only)"]
+    AG["packages/agent<br/>LangGraph investigation"]
+    RP["packages/reproduction<br/>prove the bug"]
+    FX["packages/fix-engine<br/>write and prove the fix"]
+    GHP["packages/github<br/>branch, commit, PR"]
+    DOCK[["Docker sandbox on the API host<br/>network disabled, ephemeral"]]
+  end
+
+  DB[("Postgres")]
+  OAI["OpenAI API"]
+  GH["GitHub<br/>API and git remote"]
+  DASH["apps/dashboard<br/>Next.js"]
+  HUMAN(["Human reviewer"])
+
+  SDK -- "HTTPS POST, Bearer API key" --> EV
+  EV -- "store event, upsert incident" --> DB
+  EV -- "incident is new" --> PIPE
+  PIPE --> AG --> RP --> FX --> GHP
+  AG -. "LLM calls" .-> OAI
+  RP -. "LLM calls" .-> OAI
+  FX -. "LLM calls" .-> OAI
+  RP -. "run tests" .-> DOCK
+  FX -. "run tests" .-> DOCK
+  PIPE -. "read code, file tree, commits" .-> GH
+  GHP -- "push branch, open PR" --> GH
+  PIPE -. "persist every stage" .-> DB
+  DASH -- "read results, re-run stages" --> SRV
+  GH --> HUMAN
+```
+
+**What calls the investigation graph.** Nothing listens or polls. `POST
+/events` stores the event and groups it into an incident; if that event
+*created* the incident, the route calls `runAutoPipeline(incidentId)`
+([`apps/api/src/pipeline`](apps/api/src/pipeline/auto-pipeline.service.ts)).
+That runs the same stage functions the dashboard buttons call, and
+`startInvestigation` in `apps/api/src/investigations` is what invokes the
+LangGraph graph in `packages/agent` — the graph is a plain library function
+handed its input. Repeat errors only bump the incident's `occurrenceCount`.
+Set `AUTO_PIPELINE_ENABLED=false` to go back to triggering each stage from
+the dashboard.
+
+The same thing as a call tree (each stage runs only if the previous one
+succeeded):
+
+```
+monitored app                       rootly.ai server (apps/api, :3001)
+─────────────                       ──────────────────────────────────
+SDK: captureException
+  └─ POST /events ────────────────► routes/events.ts
+                                      ├─ store ErrorEvent, group into Incident
+                                      └─ if new incident → runAutoPipeline(incidentId)
+                                            ├─ collectContext        (GitHub API)
+                                            ├─ startInvestigation ─► runInvestigation()
+                                            │                          = investigation.graph  (OpenAI)
+                                            ├─ startReproduction     (OpenAI + Docker sandbox)
+                                            ├─ startFixAttempt       (OpenAI + Docker sandbox)
+                                            └─ startPrCreation       (GitHub API)
+```
+
+```mermaid
+flowchart TD
+  A["POST /events stored"] --> B{"New incident?"}
+  B -- "no: occurrenceCount + 1" --> Z["Done"]
+  B -- yes --> C["1. Collect context<br/>stack trace to repo file, related tests, last 10 commits"]
+  C -- "no repo, not synced, or no frame matches" --> STOP
+  C --> D["2. Investigate<br/>ranked hypotheses with cited evidence"]
+  D -- "not COMPLETED" --> STOP
+  D --> E["3. Reproduce<br/>LLM writes a test, Docker sandbox runs it"]
+  E --> F{"REPRODUCED?"}
+  F -- "NOT_REPRODUCED or INCONCLUSIVE" --> STOP
+  F -- yes --> G["4. Fix<br/>LLM writes a patch, fresh sandbox validates it"]
+  G --> H{"FIX_VERIFIED?"}
+  H -- "FIX_REJECTED or INCONCLUSIVE" --> STOP
+  H -- yes --> I["5. Create PR<br/>re-check patch hash, branch, commit, push, open PR"]
+  I --> J(["Human reviews and merges on GitHub"])
+  STOP["Stop and log auto_pipeline_stopped<br/>resume that stage from the dashboard"]
+```
+
+What runs inside each stage:
+
+```mermaid
+flowchart TB
+  subgraph INV["2. Investigate: packages/agent"]
+    direction LR
+    i1["load_context"] --> i2["analyze_error"] --> i3["analyze_code"] --> i4["analyze_history"] --> i5["generate_hypotheses"] --> i6["evaluate_evidence"] --> i7["generate_report"]
+  end
+  subgraph REP["3. Reproduce: packages/reproduction"]
+    direction LR
+    r1["LLM writes test"] --> r2["checkout at target commit"] --> r3["create sandbox"] --> r4["install deps"] --> r5["run test"] --> r6["classify by exit code"]
+  end
+  subgraph FIX["4. Fix: packages/fix-engine"]
+    direction LR
+    f1["analyze_fix"] --> f2["generate_patch<br/>plus safety checks"] --> f3["checkout, fresh sandbox"] --> f4["repro test must still fail"] --> f5["verify originalCode against real file<br/>apply, render diff"] --> f6["LLM writes post-fix test<br/>run it and regression tests"] --> f7["classify"]
+  end
+  subgraph PRS["5. Create PR: packages/github"]
+    direction LR
+    p1["validate patch"] --> p2["create branch"] --> p3["checkout"] --> p4["apply patch"] --> p5["commit"] --> p6["push"] --> p7["open PR"]
+  end
+  INV --> REP --> FIX --> PRS
 ```
 
 Each AI/sandbox package has its own README with deeper architecture and
@@ -233,18 +349,23 @@ npm run dev:demo       # http://localhost:4000
   additional capture paths that exercise manual capture and incident
   grouping/separation.
 
-**Then, in the dashboard:**
+**What happens.** Connect and sync the GitHub repository *before* firing the
+error. With `AUTO_PIPELINE_ENABLED` on (the default) everything below runs by
+itself once `GET /test-error` creates a new incident; open the incident page
+to see each stage's result. If a stage fails or isn't good enough (say,
+`NOT_REPRODUCED`), the pipeline stops there and you can re-run from that stage
+with the dashboard buttons.
 
 1. `GET /test-error` fires; a new incident appears in the dashboard.
-2. Connect the GitHub repository once, then collect code context.
-3. Click **Investigate** — the AI identifies that `customer` can be `null`
+2. Code context is collected from the stack trace and the connected repository.
+3. **Investigate** — the AI identifies that `customer` can be `null`
    before `.id` is accessed.
-4. Click **Reproduce Bug** — a generated Jest test actually throws the same
+4. **Reproduce Bug** — a generated Jest test actually throws the same
    `TypeError` inside a Docker sandbox: **✓ REPRODUCED**.
-5. Click **Generate Fix** — the AI proposes optional-chaining null handling,
+5. **Generate Fix** — the AI proposes optional-chaining null handling,
    applied and validated in a *fresh* sandbox: before-fix reproduction still
    fails, post-fix validation passes, regression tests pass: **✓ FIX VERIFIED**.
-6. Click **Create GitHub PR** — a real branch, commit, and pull request are
+6. **Create GitHub PR** — a real branch, commit, and pull request are
    created from the exact verified patch. The dashboard shows the PR number,
    branch, and a link to the real GitHub PR — where a human reviews the
    incident, root cause, reproduction, fix, and diff, and decides whether to
