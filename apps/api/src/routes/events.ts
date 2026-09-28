@@ -5,6 +5,7 @@ import { apiKeyAuth } from '../middleware/api-key-auth';
 import { badRequest, notFound, wrap } from '../errors';
 import { generateFingerprint } from '../incidents/utils/fingerprint';
 import { recordIncidentForEvent } from '../incidents/incidents.service';
+import { runAutoPipeline } from '../pipeline/auto-pipeline.service';
 
 export const eventsRouter = Router();
 
@@ -93,7 +94,7 @@ eventsRouter.post(
     const fingerprint = generateFingerprint(parsed.errorName, parsed.errorMessage, parsed.stackTrace);
 
     try {
-      const event = await prisma.$transaction(async (tx) => {
+      const { event, incident } = await prisma.$transaction(async (tx) => {
         const created = await tx.errorEvent.create({
           data: {
             projectId,
@@ -111,7 +112,7 @@ eventsRouter.post(
           },
         });
 
-        const incidentId = await recordIncidentForEvent(tx, {
+        const incident = await recordIncidentForEvent(tx, {
           projectId,
           environmentId,
           errorName: parsed.errorName,
@@ -121,9 +122,15 @@ eventsRouter.post(
           eventId: created.id,
         });
 
-        return tx.errorEvent.update({ where: { id: created.id }, data: { incidentId } });
+        const event = await tx.errorEvent.update({ where: { id: created.id }, data: { incidentId: incident.id } });
+        return { event, incident };
       });
       res.status(201).json({ success: true, eventId: event.eventId });
+
+      // Only a brand-new incident starts the pipeline; repeats just bump occurrenceCount.
+      if (incident.isNew && process.env.AUTO_PIPELINE_ENABLED !== 'false') {
+        void runAutoPipeline(incident.id);
+      }
     } catch (err) {
       if (isUniqueConstraintError(err)) {
         res.status(200).json({ success: true, eventId: parsed.eventId, duplicate: true });

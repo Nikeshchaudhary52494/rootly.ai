@@ -3,6 +3,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../src/prisma';
+import { recordIncidentForEvent } from '../src/incidents/incidents.service';
 import { startTestServer, seedProjectWithApiKey, cleanupProject, validEventBody } from './helpers';
 
 let server: Awaited<ReturnType<typeof startTestServer>>;
@@ -217,4 +218,26 @@ test('rejects an invalid status transition', async () => {
     body: JSON.stringify({ status: 'CLOSED' }),
   });
   assert.equal(res.status, 400);
+});
+
+test('recordIncidentForEvent reports isNew only for the event that creates the incident', async () => {
+  const { rawKey, project, environment } = await seed();
+  const res = await sendEvent(rawKey);
+  assert.equal(res.status, 201);
+  const event = await prisma.errorEvent.findFirstOrThrow({ where: { projectId: project.id } });
+
+  const input = {
+    projectId: project.id,
+    environmentId: environment.id,
+    errorName: 'IsNewProbeError',
+    errorMessage: 'probe',
+    timestamp: new Date(),
+    eventId: event.id,
+  };
+  const first = await prisma.$transaction((tx) => recordIncidentForEvent(tx, input));
+  const second = await prisma.$transaction((tx) => recordIncidentForEvent(tx, input));
+
+  assert.equal(first.isNew, true);
+  assert.equal(second.isNew, false);
+  assert.equal(second.id, first.id);
 });

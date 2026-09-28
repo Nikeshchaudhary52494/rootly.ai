@@ -6,6 +6,9 @@ import { app } from '../src/app';
 import { prisma } from '../src/prisma';
 import { EnvironmentType } from '../src/generated/prisma/client';
 
+// Tests ingest real events; never let them spin up the LLM/sandbox/GitHub pipeline.
+process.env.AUTO_PIPELINE_ENABLED = 'false';
+
 export async function startTestServer() {
   const server = app.listen(0);
   await new Promise<void>((resolve) => server.once('listening', resolve));

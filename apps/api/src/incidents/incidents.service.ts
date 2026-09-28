@@ -21,15 +21,16 @@ interface RecordEventInput {
  * upsert so concurrent events for the same fingerprint can never create two
  * incidents (the unique constraint is enforced by Postgres, not app code).
  * Reopens a RESOLVED incident; leaves an IGNORED one alone but still counts it.
+ * `isNew` is true only for the event that created the incident.
  */
 export async function recordIncidentForEvent(
   tx: Prisma.TransactionClient,
   input: RecordEventInput,
-): Promise<string> {
+): Promise<{ id: string; isNew: boolean }> {
   const fingerprint = generateFingerprint(input.errorName, input.errorMessage, input.stackTrace);
   const title = generateIncidentTitle(input.errorName, input.errorMessage);
 
-  const rows = await tx.$queryRaw<{ id: string }[]>`
+  const rows = await tx.$queryRaw<{ id: string; occurrenceCount: number }[]>`
     INSERT INTO "Incident" (
       "id", "projectId", "environmentId", "fingerprint", "title", "errorName", "errorMessage",
       "status", "occurrenceCount", "firstSeenAt", "lastSeenAt", "latestEventId", "resolvedAt",
@@ -48,10 +49,10 @@ export async function recordIncidentForEvent(
       "status" = CASE WHEN "Incident"."status" = 'RESOLVED' THEN 'OPEN' ELSE "Incident"."status" END,
       "resolvedAt" = CASE WHEN "Incident"."status" = 'RESOLVED' THEN NULL ELSE "Incident"."resolvedAt" END,
       "updatedAt" = now()
-    RETURNING "id"
+    RETURNING "id", "occurrenceCount"
   `;
 
-  return rows[0].id;
+  return { id: rows[0].id, isNew: rows[0].occurrenceCount === 1 };
 }
 
 const INCIDENT_LIST_SELECT = {
